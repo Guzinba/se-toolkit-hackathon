@@ -1,0 +1,230 @@
+from fastapi import FastAPI, Depends, HTTPException, Body
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from sqlmodel import SQLModel, Field, create_engine, Session, select
+from sqlalchemy import or_
+from datetime import datetime
+from typing import Optional, List
+import httpx, json
+
+app = FastAPI()
+DATABASE_URL = "postgresql://quicknote:quicknote123@localhost:5432/quicknote_db"
+engine = create_engine(DATABASE_URL)
+
+def get_session():
+    with Session(engine) as s:
+        yield s
+
+class Note(SQLModel, table=True):
+    __tablename__ = "notes"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str = Field(default="")
+    content: str = Field(max_length=5000)
+    tags: str = Field(default="[]")
+    insight: str = Field(default="")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+@app.on_event("startup")
+def startup():
+    SQLModel.metadata.create_all(engine)
+
+ALL_TAGS = ["учеба","планы","работа","идеи","личное","важно","лекция","семинар","лаба","экзамен","тест","домашка","встреча","дедлайн","проект","ментор","идея","креатив"]
+OLLAMA_URL = "http://127.0.0.1:11434/v1/chat/completions"
+
+async def llm_call(prompt: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(OLLAMA_URL, json={"model":"qwen2.5:1.5b","messages":[{"role":"user","content":prompt}]})
+            return r.json()["choices"][0]["message"]["content"].strip()
+    except:
+        return ""
+
+def auto_tags(text: str) -> List[str]:
+    t = text.lower()
+    tags = []
+    if any(w in t for w in ["лаба","тест","экзамен","лекция","семинар","домашка"]): tags.append("учеба")
+    if any(w in t for w in ["встреча","дедлайн","срок","план"]): tags.append("планы")
+    if any(w in t for w in ["проект","ментор","работа"]): tags.append("работа")
+    if any(w in t for w in ["идея","креатив"]): tags.append("идеи")
+    if not tags: tags.append("личное")
+    return tags[:3]
+
+class NoteIn(BaseModel):
+    content: str
+
+class TagUpdate(BaseModel):
+    note_id: int
+    tags: List[str]
+
+@app.get("/api/tags")
+def get_tags():
+    return {"tags": ALL_TAGS}
+
+@app.post("/api/process")
+async def process_note(data: NoteIn, session: Session = Depends(get_session)):
+    title = " ".join(data.content.split()[:7])[:100] or "Заметка"
+    tags = auto_tags(data.content)
+    insight = await llm_call(f"Note: {data.content[:150]}. Give one short helpful tip in Russian, max 10 words.") or "💡 Совет: дополните заметку"
+    note = Note(title=title, content=data.content, tags=json.dumps(tags), insight=insight)
+    session.add(note)
+    session.commit()
+    session.refresh(note)
+    return {"success": True, "id": note.id, "title": title, "content": data.content, "tags": tags, "insight": insight}
+
+@app.post("/api/update-tags")
+def update_tags(data: TagUpdate, session: Session = Depends(get_session)):
+    note = session.get(Note, data.note_id)
+    if not note:
+        raise HTTPException(404, "Not found")
+    note.tags = json.dumps(data.tags[:5])
+    session.commit()
+    return {"success": True}
+
+@app.get("/api/notes/{nid}")
+def get_note(nid: int, session: Session = Depends(get_session)):
+    note = session.get(Note, nid)
+    if not note:
+        raise HTTPException(404, "Not found")
+    return {"id": note.id, "title": note.title, "content": note.content, "tags": json.loads(note.tags), "insight": note.insight, "created_at": note.created_at.isoformat()}
+
+@app.get("/api/notes")
+def list_notes(limit: int = 50, session: Session = Depends(get_session)):
+    notes = session.exec(select(Note).order_by(Note.created_at.desc()).limit(limit)).all()
+    return [{"id": n.id, "title": n.title, "content": n.content, "tags": json.loads(n.tags), "insight": n.insight, "created_at": n.created_at.isoformat()} for n in notes]
+
+@app.post("/api/search")
+async def search_notes(query_data: dict = Body(), session: Session = Depends(get_session)):
+    q = query_data.get("query", "").strip()
+    if len(q) < 2:
+        return {"success": False, "message": "Минимум 2 символа"}
+    keywords = [w for w in q.lower().split() if len(w) > 2] or [q.lower()]
+    conds = [Note.content.ilike(f"%{k}%") for k in keywords] + [Note.title.ilike(f"%{k}%") for k in keywords]
+    notes = session.exec(select(Note).where(or_(*conds)).order_by(Note.created_at.desc()).limit(5)).all()
+    if not notes:
+        return {"success": False, "message": "Ничего не найдено"}
+    ctx = "\n".join([f"- [{n.title}] {n.content[:100]}" for n in notes])
+    ans = await llm_call(f"Query: {q}\nNotes:\n{ctx}\n\nAnswer in Russian: summarize findings and give 1 tip. Under 3 sentences.") or f"🔍 Найдено {len(notes)} записей"
+    return {"success": True, "answer": ans, "notes": [{"id": n.id, "title": n.title, "content": n.content, "tags": json.loads(n.tags), "created_at": n.created_at.isoformat()} for n in notes]}
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "db": "postgresql", "llm": "ollama"}
+
+HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><title>QuickNote AI</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;max-width:800px;margin:0 auto;padding:20px;background:#f8f9fa;color:#1f2937}
+.card{background:#fff;padding:20px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:16px}
+h1,h2{margin-bottom:12px}
+textarea,input{width:100%;padding:12px;border:2px solid #e5e7eb;border-radius:8px;font-size:16px;margin-bottom:8px}
+textarea{min-height:100px;resize:vertical}
+button{background:#4f46e5;color:#fff;border:none;padding:12px 20px;border-radius:8px;font-size:16px;cursor:pointer}
+button:hover{background:#4338ca}button:disabled{background:#9ca3af;cursor:not-allowed}
+.result{margin-top:12px;padding:16px;background:#f0f9ff;border-radius:8px;display:none}
+.result.show{display:block}
+.tag{display:inline-block;background:#e0e7ff;color:#3730a3;padding:4px 12px;border-radius:20px;font-size:14px;margin:4px 4px 4px 0;cursor:pointer}
+.tag.rem:hover{background:#fecaca}
+.note{padding:12px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px;cursor:pointer}
+.note:hover{background:#f9fafb}.note.exp{background:#f9fafb}
+.note-title{font-weight:600;margin-bottom:4px}
+.note-date{color:#6b7280;font-size:12px}
+.note-preview{color:#4b5563;font-size:14px}
+.note-full{background:#fff;padding:12px;border-radius:6px;margin-top:8px;border-left:3px solid #4f46e5}
+.tag-cloud{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.tag-opt{padding:6px 12px;border:2px solid #e5e7eb;border-radius:20px;cursor:pointer;font-size:13px}
+.tag-opt:hover{border-color:#4f46e5}.tag-opt.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+.error{color:#dc2626;margin-top:8px}.success{color:#059669;margin-top:8px}
+</style></head><body>
+<div class="card"><h1>✨ QuickNote AI</h1><textarea id="content" placeholder="Введите заметку..."></textarea><button id="saveBtn" onclick="saveNote()">💾 Сохранить</button><div id="saveErr" class="error"></div><div class="result" id="saveRes"><div style="background:#fff;padding:12px;border-radius:6px;margin-bottom:12px;border-left:3px solid #4f46e5"><strong id="savedTitle"></strong><br><span id="savedContent" style="color:#4b5563"></span></div><div><strong>🏷️ Теги:</strong><div id="tagList"></div></div><div style="margin-top:8px"><strong>Добавить:</strong><div class="tag-cloud" id="tagCloud"></div></div><div style="margin-top:12px"><strong>💡 Инсайт:</strong><p id="savedInsight"></p></div><button onclick="confirmTags()" style="margin-top:12px;width:100%">✅ Подтвердить</button></div></div>
+<div class="card"><h2>🔍 Умный поиск</h2><input type="text" id="searchQ" placeholder="Запрос..."><button onclick="doSearch()">🔎 Найти</button><div id="searchErr" class="error"></div><div class="result" id="searchRes"></div><div id="searchList"></div></div>
+<div class="card"><h2>📚 История</h2><div id="history"></div></div>
+<script>
+let curId=null,curTags=[],allTags=[];
+fetch("/api/tags").then(r=>r.json()).then(d=>{allTags=d.tags||[];});
+async function saveNote(){
+  const c=document.getElementById("content").value.trim();
+  const btn=document.getElementById("saveBtn");
+  const err=document.getElementById("saveErr");
+  if(!c){err.textContent="Введите текст";return}
+  err.textContent="";btn.disabled=true;btn.textContent="⏳";
+  try{
+    const r=await fetch("/api/process",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:c})});
+    const d=await r.json();
+    if(!d.success){err.textContent=d.detail||"Ошибка";return}
+    curId=d.id;curTags=d.tags||[];
+    document.getElementById("savedTitle").textContent=d.title;
+    document.getElementById("savedContent").textContent=d.content.length>150?d.content.substring(0,150)+"...":d.content;
+    document.getElementById("savedInsight").textContent=d.insight;
+    renderTags();renderCloud();
+    document.getElementById("saveRes").classList.add("show");
+    document.getElementById("content").value="";
+    loadHist();
+  }catch(e){err.textContent="Ошибка: "+e.message}
+  finally{btn.disabled=false;btn.textContent="💾 Сохранить"}
+}
+function renderTags(){
+  const div=document.getElementById("tagList");div.innerHTML="";
+  if(!curTags.length){div.innerHTML="<span style='color:#6b7280'>Нет тегов</span>";return}
+  curTags.forEach(t=>{
+    const s=document.createElement("span");s.className="tag rem";s.textContent="#"+t+" ×";
+    s.onclick=()=>{curTags=curTags.filter(x=>x!==t);renderTags();renderCloud()};
+    div.appendChild(s);
+  });
+}
+function renderCloud(){
+  const div=document.getElementById("tagCloud");div.innerHTML="";
+  allTags.forEach(t=>{
+    const b=document.createElement("span");b.className="tag-opt"+(curTags.includes(t)?" active":"");b.textContent=t;
+    b.onclick=()=>{if(curTags.includes(t)){curTags=curTags.filter(x=>x!==t)}else if(curTags.length<5){curTags.push(t)};renderTags();renderCloud()};
+    div.appendChild(b);
+  });
+}
+async function confirmTags(){
+  if(!curId)return;
+  try{
+    const r=await fetch("/api/update-tags",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({note_id:curId,tags:curTags})});
+    const d=await r.json();
+    if(d.success){document.getElementById("saveErr").className="success";document.getElementById("saveErr").textContent="✅ Обновлено";setTimeout(()=>{document.getElementById("saveRes").classList.remove("show");document.getElementById("saveErr").className="error";document.getElementById("saveErr").textContent=""},2000);loadHist()}}
+  catch(e){alert("Ошибка: "+e.message)}
+}
+async function doSearch(){
+  const q=document.getElementById("searchQ").value.trim();
+  const btn=document.querySelector("#searchQ+button");
+  const err=document.getElementById("searchErr");
+  if(!q){err.textContent="Введите запрос";return}
+  err.textContent="";btn.disabled=true;btn.textContent="⏳";
+  try{
+    const r=await fetch("/api/search",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});
+    const d=await r.json();
+    if(!d.success){document.getElementById("searchRes").textContent="🔍 "+d.message;document.getElementById("searchRes").classList.add("show");return}
+    document.getElementById("searchRes").textContent=d.answer;document.getElementById("searchRes").classList.add("show");
+    let h="";(d.notes||[]).forEach(n=>{h+="<div class='note' onclick='toggleNote("+n.id+")'><div class='note-title'>"+(n.title||"Без заголовка")+"</div><div class='note-date'>"+(n.created_at||"").substring(0,10)+"</div><div class='note-preview'>"+(n.content||"").substring(0,120)+"...</div></div>"});
+    document.getElementById("searchList").innerHTML=h;
+  }catch(e){err.textContent="Ошибка: "+e.message}
+  finally{btn.disabled=false;btn.textContent="🔎 Найти"}
+}
+async function toggleNote(id){
+  const el=event.currentTarget;
+  if(el.classList.contains("expanded")){el.classList.remove("expanded");el.innerHTML=el.dataset.collapsed;return}
+  try{
+    const r=await fetch("/api/notes/"+id);const n=await r.json();
+    el.dataset.collapsed=el.innerHTML;
+    el.classList.add("expanded");
+    el.innerHTML="<div class='note-title'>"+(n.title||"Без заголовка")+"</div><div class='note-date'>"+(n.created_at||"").substring(0,10)+"</div><div class='note-full'>"+n.content+"</div><div style='margin-top:8px'><span style='color:#6b7280;font-size:12px'>🏷️ "+((n.tags||[]).join(", ")||"нет")+"</span></div>"+(n.insight?"<div style='margin-top:8px;color:#059669;font-size:13px'>💡 "+n.insight+"</div>":"");
+  }catch(e){alert("Ошибка загрузки")}
+}
+async function loadHist(){
+  const div=document.getElementById("history");
+  try{
+    const r=await fetch("/api/notes");const d=await r.json();
+    if(!d||!d.length){div.innerHTML="<span style='color:#6b7280'>Пусто</span>";return}
+    let h="";d.forEach(n=>{h+="<div class='note' onclick='toggleNote("+n.id+")'><div class='note-title'>"+(n.title||"Без заголовка")+"</div><div class='note-date'>"+(n.created_at||"").substring(0,10)+"</div><div class='note-preview'>"+(n.content||"").substring(0,120)+"...</div></div>"});
+    div.innerHTML=h;
+  }catch(e){div.innerHTML="<span style='color:#6b7280'>Ошибка</span>"}
+}
+loadHist();
+</script></body></html>"""
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return HTML

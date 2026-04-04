@@ -1,0 +1,111 @@
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
+import random
+
+app = FastAPI()
+
+# HTML без вложенных кавычек — используем одинарные кавычки в JS
+HTML = '''<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>QuickNote AI</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; background: #f8f9fa; }
+    .card { background: white; padding: 24px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    textarea { width: 100%; min-height: 100px; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; }
+    button { background: #4f46e5; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; cursor: pointer; margin: 12px 0; }
+    button:hover { background: #4338ca; }
+    .result { margin-top: 20px; padding: 16px; background: #f0f9ff; border-radius: 8px; display: none; }
+    .result.show { display: block; }
+    .tags { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+    .tag { background: #e0e7ff; color: #3730a3; padding: 4px 12px; border-radius: 20px; font-size: 14px; }
+    .error { color: #dc2626; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>✨ QuickNote AI</h1>
+    <textarea id="content" placeholder="Введите заметку..."></textarea>
+    <button id="btn" onclick="process()">🚀 Обработать</button>
+    <div id="error" class="error"></div>
+    <div class="result" id="result">
+      <div><strong>🏷️ Теги:</strong> <div class="tags" id="tags"></div></div>
+      <div style="margin-top:12px"><strong>💡 Инсайт:</strong> <p id="insight"></p></div>
+    </div>
+  </div>
+  <script>
+    async function process() {
+      const content = document.getElementById("content").value.trim();
+      const btn = document.getElementById("btn");
+      const err = document.getElementById("error");
+      const result = document.getElementById("result");
+      
+      if (!content) { err.textContent = "Введите текст"; return; }
+      
+      btn.disabled = true;
+      err.textContent = "";
+      result.classList.remove("show");
+      
+      try {
+        const resp = await fetch("/api/process", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({content: content})
+        });
+        
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        
+        const data = await resp.json();
+        
+        // Показываем теги
+        const tagsDiv = document.getElementById("tags");
+        tagsDiv.innerHTML = "";
+        data.tags.forEach(function(t) {
+          const span = document.createElement("span");
+          span.className = "tag";
+          span.textContent = "#" + t;
+          tagsDiv.appendChild(span);
+        });
+        
+        // Показываем инсайт
+        document.getElementById("insight").textContent = data.insight;
+        result.classList.add("show");
+        
+      } catch (e) {
+        err.textContent = "Ошибка: " + e.message;
+        console.error("Fetch error:", e);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>'''
+
+def generate_tags(text):
+    t = text.lower()
+    if any(w in t for w in ["встреча","созвон","ментор"]): return ["встреча","работа","коммуникация"]
+    if any(w in t for w in ["дедлайн","лаба","сдать"]): return ["учеба","дедлайн","срочно"]
+    if any(w in t for w in ["идея","план","хочу"]): return ["идея","планирование","креатив"]
+    return ["заметка","общее"]
+
+def generate_insight(text, tags):
+    if "дедлайн" in tags or "срочно" in tags: return "⚡ Это срочно! Начни с самого простого пункта."
+    if "идея" in tags: return "💭 Идеи ценны, когда записаны. Сохрани в надёжном месте!"
+    return "💡 Совет: запиши конкретный следующий шаг."
+
+@app.get("/", response_class=HTMLResponse)
+async def home(): return HTML
+
+class NoteRequest(BaseModel): content: str
+
+@app.post("/api/process")
+async def process_note(data: NoteRequest):
+    tags = generate_tags(data.content)
+    insight = generate_insight(data.content, tags)
+    return JSONResponse(content={"success": True, "tags": tags, "insight": insight, "original": data.content[:200]})
+
+@app.get("/health")
+async def health(): return {"status": "ok"}

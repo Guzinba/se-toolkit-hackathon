@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env files (секреты!)
+.env
+.env.*
+*.secret
+!*.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local DB files (если используешь SQLite)
+*.db
+*.sqlite3
