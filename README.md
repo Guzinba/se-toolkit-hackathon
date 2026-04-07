@@ -1,75 +1,143 @@
-# Lab 8 — The Agent is the Interface
+# ✨ QuickNote AI
 
-[Sync your fork](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/syncing-a-fork#syncing-a-fork-branch-from-the-command-line) regularly — the lab gets updated.
+Smart notebook with auto-tagging, AI-powered insights, and contextual search.
 
-## Product brief
+---
 
-> Your team has been running the LMS backend for weeks. Everyone queries data through the React dashboard or Swagger UI. Your team lead wants a new kind of interface: an AI agent that anyone can talk to in natural language. Nanobot is a lighter version of OpenClaw, and this kind of agent is becoming the new intelligent AI user interface. Instead of clicking through dashboards, users just ask questions — "which lab has the lowest pass rate?", "any errors in the last hour?" — and the agent figures out which API calls to make.
->
-> Set it up from scratch. Wire it into the system. Then extend it with observability tools so it can answer questions about system health too.
+## 🎬 Demo
 
-> [!IMPORTANT]
-> Do the whole lab on your **VM**. You can work through a plain SSH shell or through `VS Code` Remote-SSH. When this guide says `localhost`, it means the VM itself or a forwarded port from that VM. Do not install or run `nanobot` on your main machine.
+### Interface Screenshots
 
-## What you will learn
+#### Main Page
+![Main](screenshots/write_note.png)
+*Note input, save button, results area*
 
-By the end of this lab, you should be able to say:
+#### Smart Search
+![Search](screenshots/smart_search.png)
+*Contextual answer to query across notes*
 
-> 1. I can explain what makes an AI agent different from a regular client like a web app or a bot.
->    It is not just a self-hosted chat window: it has tools, skills, memory, and can act proactively.
-> 2. I set up nanobot from scratch — created the project, installed the framework, connected it to the Qwen API, wired it into Docker Compose, and talked to it.
-> 3. I saw what a bare agent does without tools (hallucinates) vs. with MCP tools (answers correctly) — and I understand why.
-> 4. I built MCP tools that let the agent query logs and traces, turning observability data into a conversational interface.
-> 5. I used the agent to investigate a failure, fix a planted bug, and configure it to report system health proactively.
+#### Notes History
+![History](screenshots/store.png)
+*Expandable cards with full content*
 
-## Architecture
+---
 
-By the end of the lab, the system looks like this.
+## 🌍 Product Context
 
-In Lab 7 you built one client around your own LLM loop. Here, the agent becomes a shared system layer that multiple clients can talk to — and that layer has reusable tools, memory, and scheduled actions.
+### Target Users
+- Students taking lecture and lab notes
+- Developers capturing ideas and tasks
+- Anyone who takes notes and wants to find them quickly
 
+### Problem Solved for End Users
+1. **Notes get lost**: Manual saving across different places, no unified storage
+2. **Search doesn't work**: Hard to find notes by keywords, especially if you forget exact wording
+3. **No automation**: Manual tagging takes time, easy to forget categorization
+4. **No intelligent assistance**: Users don't get hints on how to improve or complement their notes
+
+### Your Solution
+**QuickNote AI** is a unified web application that:
+- ✅ Automatically analyzes note text and suggests relevant tags
+- ✅ Allows quick confirmation, removal, or addition of tags from a fixed set
+- ✅ Generates personalized tips from local LLM (Ollama + qwen2.5:1.5b)
+- ✅ Provides smart search: ask in your own words → get contextual answer based on your notes
+- ✅ Stores everything in PostgreSQL with expandable note cards for full viewing
+
+---
+
+## ⚙️ Features
+
+### Implemented Features (Version 1)
+| Feature | Status | Description |
+|---------|--------|-------------|
+| 📝 Save Note | ✅ | Text → auto-title + auto-tags + AI insight |
+| 🏷️ Auto-Tagging | ✅ | Keyword analysis → categories: `study`, `plans`, `work`, `ideas`, `personal`, `important` |
+| ✅ Tag Validation | ✅ | Remove extras, add from cloud, max 5 tags |
+| 💡 LLM Insight | ✅ | Personalized tip up to 10 words (Ollama, qwen2.5:1.5b) |
+| 🔍 Smart Search | ✅ | SQL text search + contextual AI response |
+| 📚 History | ✅ | Notes list with expandable full-view cards |
+| 🗄️ PostgreSQL | ✅ | Reliable storage with automatic schema migration |
+| 🌐 Web Interface | ✅ | Single HTML file, responsive design, no external dependencies |
+
+---
+
+## 🚀 Usage
+
+### How to Use the Product
+
+1.  **Open the application** in browser: `http://<VM-IP>:9999`
+2.  **Enter your note** in the text area (e.g., *"Tomorrow database lab, prepare demo"*)
+3.  **Click "💾 Save"** → application automatically:
+    - Generates title from first 7 words
+    - Suggests tags based on keywords (`#study`, `#plans`)
+    - Gets AI-powered tip (*"💡 Check DB connection before demo"*)
+4.  **Edit tags** (optional):
+    - Click `×` on unwanted tag to remove
+    - Click tag from cloud to add (max 5)
+    - Click **"✅ Confirm"** to save changes
+5.  **Find notes** via smart search:
+    - Enter query in search field (e.g., *"what did I write about databases?"*)
+    - Get contextual AI response + list of found notes
+6.  **View history**:
+    - Click any note in the list → expands for full viewing
+
+---
+
+## 🐳 Deployment
+
+### Virtual Machine Requirements  
+- **OS**: Ubuntu 24.04 (as on university VMs)
+- **Architecture**: x86_64
+- **RAM**: minimum 2 GB
+- **Disk**: minimum 10 GB free space
+- **Network**: access to ports 9999 (app), 5432 (DB), 11434 (Ollama)
+
+### Prerequisites on VM
+
+#### Option A: Direct Run (recommended for university VMs)
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+sudo apt update && sudo apt install -y postgresql postgresql-contrib
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:1.5b
 ```
-[Browser]            [Telegram, optional]
-    \                       /
-     \                     /
-      +---- [Nanobot Agent] ---- [LLM]
-                 |
-         +-------+-------+
-         |               |
-   [LMS Tools]   [Observability Tools]
-         |               |
-   [LMS Backend]    [Logs / Traces]
-         |
-    [Postgres]
+#### Option B: Docker (for production)
+```bash
+sudo apt update && sudo apt install -y docker.io docker-compose
+sudo usermod -aG docker $USER
 ```
 
-### What you start with
+### Step-by-Step Deployment Instructions
+#### Option 1: Direct Run (without Docker)
+```bash
+git clone https://github.com/Guzinba/se-toolkit-hackathon.git
+cd se-toolkit-hackathon
+sudo -u postgres psql -c "CREATE USER quicknote WITH PASSWORD 'quicknote123';"
+sudo -u postgres psql -c "CREATE DATABASE quicknote_db OWNER quicknote;"
+uv venv
+source .venv/bin/activate
+uv pip install fastapi sqlmodel httpx uvicorn psycopg2-binary pydantic sqlalchemy
+ollama serve &
+cd simple_app
+uv run uvicorn main:app --host 0.0.0.0 --port 9999
+```
+#### Option 2: Docker (production)
+```bash
+git clone https://github.com/Guzinba/se-toolkit-hackathon.git
+cd se-toolkit-hackathon
+docker-compose up -d --build
+docker exec -it quicknote-ollama ollama pull qwen2.5:1.5b
+```
 
-- **LMS app**: the React dashboard, FastAPI backend, and PostgreSQL database.
-- **Platform services**: Caddy reverse-proxies all traffic, and the Qwen Code API gives your agent access to the LLM.
-- **Observability stack**: OpenTelemetry Collector, VictoriaLogs, and VictoriaTraces already collect system telemetry.
+#### Health Check
+```bash
+curl http://localhost:9999/health
+curl -X POST http://localhost:9999/api/process -H "Content-Type: application/json" -d '{"content":"Test"}'
+```
 
-### What you add
-
-- **Nanobot agent**: a natural-language interface to the LMS that can reason, call tools, and answer questions.
-- **Web chat client**: a WebSocket channel plus a Flutter web UI at `/flutter`, protected by `NANOBOT_ACCESS_KEY`.
-- **New agent capabilities**: LMS MCP tools first, then observability MCP tools, then a scheduled health-check job.
-
-## Tasks
-
-### Prerequisites
-
-1. Complete the [lab setup](./lab/setup/setup-simple.md#lab-setup)
-
-> **Note**: First time in this course? Do the [full setup](./lab/setup/setup-full.md#lab-setup) instead.
-
-### Required
-
-1. [Set Up the Agent](./lab/tasks/required/task-1.md) — install nanobot, configure Qwen API, add MCP tools, write skill prompt
-2. [Deploy and Connect a Web Client](./lab/tasks/required/task-2.md) — Dockerize nanobot, add WebSocket channel + Flutter chat UI
-3. [Give the Agent New Eyes](./lab/tasks/required/task-3.md) — explore observability data, write log/trace MCP tools
-4. [Diagnose a Failure and Make the Agent Proactive](./lab/tasks/required/task-4.md) — investigate a failure, schedule in-chat health checks, fix a planted bug
-
-### Optional
-
-1. [Add a Telegram Bot Client](./lab/tasks/optional/task-1.md) — same agent, different interface
+#### Environment Variables
+| Variable | Default | Description |
+|---------|--------|-------------|
+| DATABASE_URL | postgresql://quicknote:quicknote123@localhost:5432/quicknote_db | PostgreSQL connection |
+| OLLAMA_URL | http://127.0.0.1:11434/v1/chat/completions | LLM API endpoint |

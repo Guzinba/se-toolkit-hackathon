@@ -1,11 +1,11 @@
-from fastapi import FastAPI, Depends, Body, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Body
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field, create_engine, Session, select
 from sqlalchemy import or_
 from datetime import datetime
 from typing import Optional, List
-import httpx, json, os
+import httpx, json, os, os
 
 app = FastAPI()
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://quicknote:quicknote123@localhost:5432/quicknote_db")
@@ -31,26 +31,21 @@ def startup():
 ALL_TAGS = ["учеба","планы","работа","идеи","личное","важно","лекция","семинар","лаба","экзамен","тест","домашка","встреча","дедлайн","проект","ментор","идея","креатив"]
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/v1/chat/completions")
 
-async def llm_call(prompt: str, timeout: int = 10) -> str:
+async def llm_call(prompt: str) -> str:
     try:
-        async with httpx.AsyncClient(timeout=timeout) as c:
-            r = await c.post(OLLAMA_URL, json={
-                "model":"qwen2.5:1.5b",
-                "messages":[{"role":"user","content":prompt}],
-                "max_tokens": 80
-            })
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(OLLAMA_URL, json={"model":"qwen2.5:1.5b","messages":[{"role":"user","content":prompt}]})
             return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"LLM error: {e}")
+    except:
         return ""
 
 def auto_tags(text: str) -> List[str]:
     t = text.lower()
     tags = []
-    if any(w in t for w in ["лаба","тест","экзамен","лекция","семинар","домашка","sql","баз","данны"]): tags.append("учеба")
-    if any(w in t for w in ["встреч","дедлайн","срок","план","завтра","врем"]): tags.append("планы")
-    if any(w in t for w in ["проект","ментор","работ"]): tags.append("работа")
-    if any(w in t for w in ["иде","креатив"]): tags.append("идеи")
+    if any(w in t for w in ["лаба","тест","экзамен","лекция","семинар","домашка"]): tags.append("учеба")
+    if any(w in t for w in ["встреча","дедлайн","срок","план"]): tags.append("планы")
+    if any(w in t for w in ["проект","ментор","работа"]): tags.append("работа")
+    if any(w in t for w in ["идея","креатив"]): tags.append("идеи")
     if not tags: tags.append("личное")
     return tags[:3]
 
@@ -69,17 +64,7 @@ def get_tags():
 async def process_note(data: NoteIn, session: Session = Depends(get_session)):
     title = " ".join(data.content.split()[:7])[:100] or "Заметка"
     tags = auto_tags(data.content)
-    
-    content_lower = data.content.lower()
-    if any(w in content_lower for w in ["лаба","экзамен","тест"]):
-        insight = "💡 Подготовьте материалы заранее"
-    elif any(w in content_lower for w in ["встреч","дедлайн"]):
-        insight = "💡 Поставьте напоминание"
-    elif any(w in content_lower for w in ["баз","sql","postgres"]):
-        insight = "💡 Проверьте подключение к БД"
-    else:
-        insight = "💡 Заметка сохранена"
-    
+    insight = await llm_call(f"Note: {data.content[:150]}. Give one short helpful tip in Russian, max 10 words.") or "💡 Совет: дополните заметку"
     note = Note(title=title, content=data.content, tags=json.dumps(tags), insight=insight)
     session.add(note)
     session.commit()
@@ -102,15 +87,6 @@ def get_note(nid: int, session: Session = Depends(get_session)):
         raise HTTPException(404, "Not found")
     return {"id": note.id, "title": note.title, "content": note.content, "tags": json.loads(note.tags), "insight": note.insight, "created_at": note.created_at.isoformat()}
 
-@app.delete("/api/notes/{nid}")
-def delete_note(nid: int, session: Session = Depends(get_session)):
-    note = session.get(Note, nid)
-    if not note:
-        raise HTTPException(404, "Note not found")
-    session.delete(note)
-    session.commit()
-    return {"success": True, "message": "Note deleted"}
-
 @app.get("/api/notes")
 def list_notes(limit: int = 50, session: Session = Depends(get_session)):
     notes = session.exec(select(Note).order_by(Note.created_at.desc()).limit(limit)).all()
@@ -121,29 +97,14 @@ async def search_notes(query_data: dict = Body(), session: Session = Depends(get
     q = query_data.get("query", "").strip()
     if len(q) < 2:
         return {"success": False, "message": "Минимум 2 символа"}
-    
-    # 🔍 1. Приводим русские слова к начальной форме через LLM
-    keywords = []
-    lemma_prompt = f"Query: '{q}'. Return ONLY comma-separated base forms of Russian words (lemma). Example: 'встречам' → 'встреча'. No explanation."
-    lemmas = await llm_call(lemma_prompt, timeout=10)
-    if lemmas:
-        keywords = [w.strip().lower() for w in lemmas.split(',') if len(w.strip()) >= 2]
-    
-    # 🔍 2. Добавляем оригинальные слова (на случай если LLM ошибся)
-    original_words = [w.lower() for w in q.split() if len(w) >= 2]
-    keywords = list(set(keywords + original_words))[:20]
-    
-    # 🔍 3. Ищем в БД
+    keywords = [w for w in q.lower().split() if len(w) > 2] or [q.lower()]
     conds = [Note.content.ilike(f"%{k}%") for k in keywords] + [Note.title.ilike(f"%{k}%") for k in keywords]
-    notes = session.exec(select(Note).where(or_(*conds)).order_by(Note.created_at.desc()).limit(10)).all()
-    
+    notes = session.exec(select(Note).where(or_(*conds)).order_by(Note.created_at.desc()).limit(5)).all()
     if not notes:
         return {"success": False, "message": "Ничего не найдено"}
-    
-    # 🔍 4. Ответ
-    answer = f"🔍 Найдено {len(notes)} записей"
-    
-    return {"success": True, "answer": answer, "notes": [{"id": n.id, "title": n.title, "content": n.content, "tags": json.loads(n.tags), "created_at": n.created_at.isoformat()} for n in notes]}
+    ctx = "\n".join([f"- [{n.title}] {n.content[:100]}" for n in notes])
+    ans = await llm_call(f"Query: {q}\nNotes:\n{ctx}\n\nAnswer in Russian: summarize findings and give 1 tip. Under 3 sentences.") or f"🔍 Найдено {len(notes)} записей"
+    return {"success": True, "answer": ans, "notes": [{"id": n.id, "title": n.title, "content": n.content, "tags": json.loads(n.tags), "created_at": n.created_at.isoformat()} for n in notes]}
 
 @app.get("/health")
 def health():
@@ -163,7 +124,7 @@ button:hover{background:#4338ca}button:disabled{background:#9ca3af;cursor:not-al
 .result.show{display:block}
 .tag{display:inline-block;background:#e0e7ff;color:#3730a3;padding:4px 12px;border-radius:20px;font-size:14px;margin:4px 4px 4px 0;cursor:pointer}
 .tag.rem:hover{background:#fecaca}
-.note{position:relative;padding:12px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px;cursor:pointer}
+.note{padding:12px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px;cursor:pointer}
 .note:hover{background:#f9fafb}.note.exp{background:#f9fafb}
 .note-title{font-weight:600;margin-bottom:4px}
 .note-date{color:#6b7280;font-size:12px}
@@ -173,11 +134,9 @@ button:hover{background:#4338ca}button:disabled{background:#9ca3af;cursor:not-al
 .tag-opt{padding:6px 12px;border:2px solid #e5e7eb;border-radius:20px;cursor:pointer;font-size:13px}
 .tag-opt:hover{border-color:#4f46e5}.tag-opt.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
 .error{color:#dc2626;margin-top:8px}.success{color:#059669;margin-top:8px}
-.delete-btn{position:absolute;right:10px;top:10px;background:#fee2e2;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:14px}
-.delete-btn:hover{background:#fecaca}
 </style></head><body>
 <div class="card"><h1>✨ QuickNote AI</h1><textarea id="content" placeholder="Введите заметку..."></textarea><button id="saveBtn" onclick="saveNote()">💾 Сохранить</button><div id="saveErr" class="error"></div><div class="result" id="saveRes"><div style="background:#fff;padding:12px;border-radius:6px;margin-bottom:12px;border-left:3px solid #4f46e5"><strong id="savedTitle"></strong><br><span id="savedContent" style="color:#4b5563"></span></div><div><strong>🏷️ Теги:</strong><div id="tagList"></div></div><div style="margin-top:8px"><strong>Добавить:</strong><div class="tag-cloud" id="tagCloud"></div></div><div style="margin-top:12px"><strong>💡 Инсайт:</strong><p id="savedInsight"></p></div><button onclick="confirmTags()" style="margin-top:12px;width:100%">✅ Подтвердить</button></div></div>
-<div class="card"><h2>🔍 Поиск</h2><input type="text" id="searchQ" placeholder="Запрос..."><button onclick="doSearch()">🔎 Найти</button><div id="searchErr" class="error"></div><div class="result" id="searchRes"></div><div id="searchList"></div></div>
+<div class="card"><h2>🔍 Умный поиск</h2><input type="text" id="searchQ" placeholder="Запрос..."><button onclick="doSearch()">🔎 Найти</button><div id="searchErr" class="error"></div><div class="result" id="searchRes"></div><div id="searchList"></div></div>
 <div class="card"><h2>📚 История</h2><div id="history"></div></div>
 <script>
 let curId=null,curTags=[],allTags=[];
@@ -238,9 +197,8 @@ async function doSearch(){
     const r=await fetch("/api/search",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});
     const d=await r.json();
     if(!d.success){document.getElementById("searchRes").textContent="🔍 "+d.message;document.getElementById("searchRes").classList.add("show");return}
-    document.getElementById("searchRes").textContent=d.answer;
-    document.getElementById("searchRes").classList.add("show");
-    let h="";(d.notes||[]).forEach(n=>{h+="<div class='note' onclick='toggleNote("+n.id+")'><button class='delete-btn' onclick='deleteNote("+n.id+",event)'>🗑️</button><div class='note-title'>"+(n.title||"Без заголовка")+"</div><div class='note-date'>"+(n.created_at||"").substring(0,10)+"</div><div class='note-preview'>"+(n.content||"").substring(0,120)+"...</div></div>"});
+    document.getElementById("searchRes").textContent=d.answer;document.getElementById("searchRes").classList.add("show");
+    let h="";(d.notes||[]).forEach(n=>{h+="<div class='note' onclick='toggleNote("+n.id+")'><div class='note-title'>"+(n.title||"Без заголовка")+"</div><div class='note-date'>"+(n.created_at||"").substring(0,10)+"</div><div class='note-preview'>"+(n.content||"").substring(0,120)+"...</div></div>"});
     document.getElementById("searchList").innerHTML=h;
   }catch(e){err.textContent="Ошибка: "+e.message}
   finally{btn.disabled=false;btn.textContent="🔎 Найти"}
@@ -252,24 +210,15 @@ async function toggleNote(id){
     const r=await fetch("/api/notes/"+id);const n=await r.json();
     el.dataset.collapsed=el.innerHTML;
     el.classList.add("expanded");
-    el.innerHTML="<button class='delete-btn' onclick='deleteNote("+n.id+",event)'>🗑️</button><div class='note-title'>"+(n.title||"Без заголовка")+"</div><div class='note-date'>"+(n.created_at||"").substring(0,10)+"</div><div class='note-full'>"+n.content+"</div><div style='margin-top:8px'><span style='color:#6b7280;font-size:12px'>🏷️ "+((n.tags||[]).join(", ")||"нет")+"</span></div>"+(n.insight?"<div style='margin-top:8px;color:#059669;font-size:13px'>💡 "+n.insight+"</div>":"");
+    el.innerHTML="<div class='note-title'>"+(n.title||"Без заголовка")+"</div><div class='note-date'>"+(n.created_at||"").substring(0,10)+"</div><div class='note-full'>"+n.content+"</div><div style='margin-top:8px'><span style='color:#6b7280;font-size:12px'>🏷️ "+((n.tags||[]).join(", ")||"нет")+"</span></div>"+(n.insight?"<div style='margin-top:8px;color:#059669;font-size:13px'>💡 "+n.insight+"</div>":"");
   }catch(e){alert("Ошибка загрузки")}
-}
-async function deleteNote(id, event){
-  event.stopPropagation();
-  if(!confirm("Удалить заметку?")) return;
-  try{
-    const r=await fetch("/api/notes/"+id,{method:"DELETE"});
-    const d=await r.json();
-    if(d.success){loadHist();doSearch();}
-  }catch(e){alert("Ошибка: "+e.message)}
 }
 async function loadHist(){
   const div=document.getElementById("history");
   try{
     const r=await fetch("/api/notes");const d=await r.json();
     if(!d||!d.length){div.innerHTML="<span style='color:#6b7280'>Пусто</span>";return}
-    let h="";d.forEach(n=>{h+="<div class='note' onclick='toggleNote("+n.id+")'><button class='delete-btn' onclick='deleteNote("+n.id+",event)'>🗑️</button><div class='note-title'>"+(n.title||"Без заголовка")+"</div><div class='note-date'>"+(n.created_at||"").substring(0,10)+"</div><div class='note-preview'>"+(n.content||"").substring(0,120)+"...</div></div>"});
+    let h="";d.forEach(n=>{h+="<div class='note' onclick='toggleNote("+n.id+")'><div class='note-title'>"+(n.title||"Без заголовка")+"</div><div class='note-date'>"+(n.created_at||"").substring(0,10)+"</div><div class='note-preview'>"+(n.content||"").substring(0,120)+"...</div></div>"});
     div.innerHTML=h;
   }catch(e){div.innerHTML="<span style='color:#6b7280'>Ошибка</span>"}
 }
