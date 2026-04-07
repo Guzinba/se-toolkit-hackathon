@@ -30,3 +30,10 @@ Thumbs.db
 # Local DB files (если используешь SQLite)
 *.db
 *.sqlite3
+
+# Accidental files
+.claude
+caddy/
+LICENSE
+*.backup
+*.broken*
