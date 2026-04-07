@@ -1,0 +1,45 @@
+version: '3.8'
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: quicknote-db
+    environment:
+      POSTGRES_USER: quicknote
+      POSTGRES_PASSWORD: quicknote123
+      POSTGRES_DB: quicknote_db
+    volumes:
+      - postgres_/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quicknote -d quicknote_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  app:
+    build: 
+      context: ./simple_app
+      dockerfile: Dockerfile
+    container_name: quicknote-app
+    ports:
+      - "9999:9999"
+    environment:
+      DATABASE_URL: postgresql://quicknote:quicknote123@db:5432/quicknote_db
+      OLLAMA_URL: http://ollama:11434/v1/chat/completions
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+  ollama:
+    image: ollama/ollama:latest
+    container_name: quicknote-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_/root/.ollama
+    restart: unless-stopped
+volumes:
+  postgres_
+  ollama_

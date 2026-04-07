@@ -5,7 +5,7 @@ from sqlmodel import SQLModel, Field, create_engine, Session, select
 from sqlalchemy import or_
 from datetime import datetime
 from typing import Optional, List
-import httpx, json, os, os
+import httpx, json, os
 
 app = FastAPI()
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://quicknote:quicknote123@localhost:5432/quicknote_db")
